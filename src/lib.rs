@@ -28,6 +28,66 @@ use std::io::Read;
 
 use bytes::{Buf, Bytes};
 use flume::Receiver;
+use glommio::LocalExecutorBuilder;
+
+const GLOMMIO_BUF_SIZE: usize = 512 << 10;
+pub struct GlommioReader {
+    handle: JoinHandle<()>,
+    reader: ChannelReader,
+}
+
+impl GlommioReader {
+    fn new<P: AsRef<Path>>(file: P) -> Self {
+        Self::with_capacity(file, GLOMMIO_BUF_SIZE)
+    }
+
+    // TODO: add pin ability
+    // TODO: allow config channel size
+    // TODO: allow config wait time
+    fn with_capacity<P: AsRef<Path>>(file: P, capacity: usize) -> Self {
+        let (tx, rx) = bounded(10);
+        let handle = LocalExecutorBuilder::new()
+            .spin_before_park(Duration::from_millis(10))
+            .spawn(move || async move {
+                let file = DmaFile::open(&dio_filename).await.unwrap();
+                let stream = DmaStreamReaderBuilder::new(file)
+                    .with_read_ahead(10)
+                    .with_buffer_size(512 << 10)
+                    .build();
+
+                let mut bytes = BytesMut::with_capacity(capacity);
+
+                loop {
+                    let buffer = stream.get_buffer_aligned(capacity as _).await.unwrap();
+                    bytes.extend_from_slice(&buffer[..]);
+                    let to_send = bytes.split();
+                    tx.send(to_send.freeze()).unwrap();
+
+                    if buffer.len() < capacity {
+                        break;
+                    }
+                }
+            })
+            .unwrap();
+
+        Self {
+            handle,
+            reader: ChannelReader::new(rx),
+        }
+    }
+}
+
+impl Read for GlommioReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
+impl Drop for GlommioReader {
+    fn drop(&mut self) {
+        self.handle.join().unwrap()
+    }
+}
 
 pub struct ChannelReader {
     rx: Receiver<Bytes>,
@@ -44,6 +104,7 @@ impl ChannelReader {
 }
 
 impl Read for ChannelReader {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut total_read = 0;
         loop {
@@ -90,7 +151,7 @@ mod tests {
     use bytes::Bytes;
     use flume::bounded;
 
-    use crate::ChannelReader;
+    use crate::{ChannelReader, GlommioReader};
 
     #[test]
     fn simple_test() {
@@ -124,5 +185,13 @@ mod tests {
         let mut buffer = vec![0; 120];
         let bytes_read = reader.read(&mut buffer).unwrap();
         assert_eq!(bytes_read, 100);
+    }
+
+    #[test]
+    fn simple_test_glommio() {
+        let mut reader = GlommioReader::new("/dev/urandom");
+        let mut buffer = vec![0; 100];
+        reader.read_exact(&mut buffer).unwrap();
+        assert_eq!(buffer.len(), 100);
     }
 }
