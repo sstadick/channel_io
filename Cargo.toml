@@ -1,0 +1,17 @@
+[package]
+name = "channel_reader"
+authors = ["Seth Stadick"]
+version = "0.1.0"
+edition = "2018"
+license = "Unlicense/MIT"
+readme = "README.md"
+documentation = "https://docs.rs/channel_reader"
+homepage = "https://github.com/sstadick/channel_reader"
+repository = "https://github.com/sstadick/channel_reader"
+categories = ["asynchronous", "concurrency"]
+keywords = ["channel", "reader"]
+description = "Reader implementation on channel of bytes"
+
+[dependencies]
+bytes = "1.1"
+flume = "0.10"
