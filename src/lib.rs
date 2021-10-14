@@ -1,3 +1,4 @@
+#![allow(clippy::missing_panics_doc)]
 //! A simple helper library to turn a channel of bytes into a reader.
 //!
 //! # Example
@@ -24,55 +25,78 @@
 //! reader.read_to_end(&mut buffer).unwrap();
 //! assert_eq!(buffer.len(), 100);
 //! ```
-use std::io::Read;
+use std::{
+    io::{Read, Write},
+    path::PathBuf,
+    thread::JoinHandle,
+    time::Duration,
+};
 
-use bytes::{Buf, Bytes};
-use flume::Receiver;
-use glommio::LocalExecutorBuilder;
+use bytes::{Buf, Bytes, BytesMut};
+use flume::{bounded, Receiver, Sender};
+use futures_lite::AsyncReadExt;
+use glommio::{
+    io::{DmaFile, DmaStreamReaderBuilder},
+    LocalExecutorBuilder,
+};
 
 const GLOMMIO_BUF_SIZE: usize = 512 << 10;
 pub struct GlommioReader {
-    handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
     reader: ChannelReader,
+    tx_kill: Sender<()>,
 }
 
 impl GlommioReader {
-    fn new<P: AsRef<Path>>(file: P) -> Self {
+    pub fn new<P: Into<PathBuf> + Send>(file: P) -> Self {
         Self::with_capacity(file, GLOMMIO_BUF_SIZE)
     }
 
     // TODO: add pin ability
     // TODO: allow config channel size
     // TODO: allow config wait time
-    fn with_capacity<P: AsRef<Path>>(file: P, capacity: usize) -> Self {
+    // TODO: add a kill signal
+    pub fn with_capacity<P: Into<PathBuf> + Send>(file: P, capacity: usize) -> Self {
+        let file = file.into();
         let (tx, rx) = bounded(10);
+        let (tx_kill, rx_kill) = bounded(1);
         let handle = LocalExecutorBuilder::new()
+            // .pin_to_cpu(32)
             .spin_before_park(Duration::from_millis(10))
             .spawn(move || async move {
-                let file = DmaFile::open(&dio_filename).await.unwrap();
-                let stream = DmaStreamReaderBuilder::new(file)
+                let file = DmaFile::open(&file).await.unwrap();
+                let mut stream = DmaStreamReaderBuilder::new(file)
                     .with_read_ahead(10)
-                    .with_buffer_size(512 << 10)
+                    .with_buffer_size(capacity)
                     .build();
 
                 let mut bytes = BytesMut::with_capacity(capacity);
 
                 loop {
+                    if rx_kill.try_recv().is_ok() {
+                        break;
+                    }
+
                     let buffer = stream.get_buffer_aligned(capacity as _).await.unwrap();
-                    bytes.extend_from_slice(&buffer[..]);
+                    bytes.resize(buffer.len(), 0);
+                    bytes.copy_from_slice(&buffer[..]);
                     let to_send = bytes.split();
-                    tx.send(to_send.freeze()).unwrap();
+                    tx.send_async(to_send.freeze()).await.unwrap();
 
                     if buffer.len() < capacity {
                         break;
                     }
+
+                    // let to_send = bytes.split_to(bytes_read);
+                    // tx.send_async(to_send.freeze()).await.unwrap();
                 }
             })
             .unwrap();
 
         Self {
-            handle,
+            handle: Some(handle),
             reader: ChannelReader::new(rx),
+            tx_kill,
         }
     }
 }
@@ -85,10 +109,62 @@ impl Read for GlommioReader {
 
 impl Drop for GlommioReader {
     fn drop(&mut self) {
-        self.handle.join().unwrap()
+        if let Some(handle) = self.handle.take() {
+            let _ret = self.tx_kill.try_send(());
+            handle.join().expect("Failed to join on glommio thread.");
+        }
     }
 }
 
+pub const BUFSIZE: usize = 64 * (1 << 10) * 2;
+
+#[derive(Debug)]
+pub struct ChannelWriter {
+    tx: Sender<Bytes>,
+    buffer: BytesMut,
+    send_size: usize,
+}
+
+impl ChannelWriter {
+    pub fn new(tx: Sender<Bytes>) -> Self {
+        Self::with_capacity(tx, BUFSIZE)
+    }
+
+    pub fn with_capacity(tx: Sender<Bytes>, capacity: usize) -> Self {
+        Self {
+            tx,
+            buffer: BytesMut::with_capacity(capacity),
+            send_size: capacity,
+        }
+    }
+}
+
+impl Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        if self.buffer.len() >= self.send_size {
+            let b = self.buffer.split_to(self.send_size).freeze();
+            self.tx.send(b).unwrap();
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let b = self.buffer.split().freeze();
+        if !b.is_empty() {
+            self.tx.send(b).unwrap();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ChannelWriter {
+    fn drop(&mut self) {
+        self.flush().unwrap()
+    }
+}
+
+#[derive(Debug)]
 pub struct ChannelReader {
     rx: Receiver<Bytes>,
     buffer: Bytes,
@@ -121,11 +197,6 @@ impl Read for ChannelReader {
             if total_read == buf.len() {
                 break;
             } else if total_read <= buf.len() {
-                eprintln!(
-                    "Status of rx: disconnected - {}, empty - {}",
-                    self.rx.is_disconnected(),
-                    self.rx.is_empty()
-                );
                 let mut new_bytes = match self.rx.recv() {
                     Ok(bytes) => bytes,
                     Err(e) => {
