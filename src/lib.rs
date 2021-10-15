@@ -1,7 +1,10 @@
-#![allow(clippy::missing_panics_doc)]
-//! A simple helper library to turn a channel of bytes into a reader.
+#![forbid(unsafe_code)]
+//! A simple helper library to convert Senders/Receivers into Writers/Readers.
 //!
-//! # Example
+//! # Examples
+//!
+//! ## Using a receiver as a reader
+//!
 //! ```rust
 //! use std::io::Read;
 //!
@@ -25,100 +28,49 @@
 //! reader.read_to_end(&mut buffer).unwrap();
 //! assert_eq!(buffer.len(), 100);
 //! ```
-use std::{
-    io::{Read, Write},
-    path::PathBuf,
-    thread::JoinHandle,
-    time::Duration,
-};
+//!
+//! ## Using a sender as a writer
+//!
+//! ```rust
+//! use std::io::Write;
+//!
+//! use bytes::Bytes;
+//! use channel_reader::ChannelWriter;
+//! use flume::{bounded, Receiver, Sender};
+//!
+//!
+//! let (tx, rx): (Sender<Bytes>, Receiver<Bytes>) = bounded(10);
+//! let sender_thread = std::thread::spawn(move || {
+//!     let mut total_read = 0;
+//!     while let Ok(bytes) = rx.recv() {
+//!         total_read += bytes.len();
+//!     }
+//!     total_read
+//! });
+//!
+//! let mut writer = ChannelWriter::new(tx);
+//! writer.write_all(b"Let's add a happy little tree.").unwrap();
+//! writer.write_all(b"And maybe a little snowcap right over here.").unwrap();
+//! writer.flush().unwrap();
+//! // Note we must drop the writer to dropt he sender to allow the thread to close
+//! drop(writer);
+//!
+//! let bytes_read = sender_thread.join().unwrap();
+//! assert_eq!(bytes_read, 73);
+//! ```
+use std::io::{Read, Write};
 
 use bytes::{Buf, Bytes, BytesMut};
 use flume::{bounded, Receiver, Sender};
-use futures_lite::AsyncReadExt;
-use glommio::{
-    io::{DmaFile, DmaStreamReaderBuilder},
-    LocalExecutorBuilder,
-};
 
-const GLOMMIO_BUF_SIZE: usize = 512 << 10;
-pub struct GlommioReader {
-    handle: Option<JoinHandle<()>>,
-    reader: ChannelReader,
-    tx_kill: Sender<()>,
-}
-
-impl GlommioReader {
-    pub fn new<P: Into<PathBuf> + Send>(file: P) -> Self {
-        Self::with_capacity(file, GLOMMIO_BUF_SIZE)
-    }
-
-    // TODO: add pin ability
-    // TODO: allow config channel size
-    // TODO: allow config wait time
-    // TODO: add a kill signal
-    pub fn with_capacity<P: Into<PathBuf> + Send>(file: P, capacity: usize) -> Self {
-        let file = file.into();
-        let (tx, rx) = bounded(10);
-        let (tx_kill, rx_kill) = bounded(1);
-        let handle = LocalExecutorBuilder::new()
-            // .pin_to_cpu(32)
-            .spin_before_park(Duration::from_millis(10))
-            .spawn(move || async move {
-                let file = DmaFile::open(&file).await.unwrap();
-                let mut stream = DmaStreamReaderBuilder::new(file)
-                    .with_read_ahead(10)
-                    .with_buffer_size(capacity)
-                    .build();
-
-                let mut bytes = BytesMut::with_capacity(capacity);
-
-                loop {
-                    if rx_kill.try_recv().is_ok() {
-                        break;
-                    }
-
-                    let buffer = stream.get_buffer_aligned(capacity as _).await.unwrap();
-                    bytes.resize(buffer.len(), 0);
-                    bytes.copy_from_slice(&buffer[..]);
-                    let to_send = bytes.split();
-                    tx.send_async(to_send.freeze()).await.unwrap();
-
-                    if buffer.len() < capacity {
-                        break;
-                    }
-
-                    // let to_send = bytes.split_to(bytes_read);
-                    // tx.send_async(to_send.freeze()).await.unwrap();
-                }
-            })
-            .unwrap();
-
-        Self {
-            handle: Some(handle),
-            reader: ChannelReader::new(rx),
-            tx_kill,
-        }
-    }
-}
-
-impl Read for GlommioReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.reader.read(buf)
-    }
-}
-
-impl Drop for GlommioReader {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            let _ret = self.tx_kill.try_send(());
-            handle.join().expect("Failed to join on glommio thread.");
-        }
-    }
-}
-
+/// The default buffer size to use (128K)
 pub const BUFSIZE: usize = 64 * (1 << 10) * 2;
 
-#[derive(Debug)]
+/// A channel writer.
+///
+/// This implements [`Write`] and will send filled [`Bytes`] buffers
+/// across the provided [`Sender`].
+#[derive(Debug, Clone)]
 pub struct ChannelWriter {
     tx: Sender<Bytes>,
     buffer: BytesMut,
@@ -126,10 +78,15 @@ pub struct ChannelWriter {
 }
 
 impl ChannelWriter {
+    /// Create a new [`ChannelWriter`]
     pub fn new(tx: Sender<Bytes>) -> Self {
         Self::with_capacity(tx, BUFSIZE)
     }
 
+    /// Crate a [`ChannelWriter`] with the given capacity.
+    ///
+    /// The capacity is used both as the size of the internal buffer, as
+    /// well as the cutoff at which to send the bytes across the channel.
     pub fn with_capacity(tx: Sender<Bytes>, capacity: usize) -> Self {
         Self {
             tx,
@@ -137,9 +94,16 @@ impl ChannelWriter {
             send_size: capacity,
         }
     }
+
+    /// Clear the internal buffer
+    pub fn reset(&mut self) {
+        self.buffer.clear()
+    }
 }
 
 impl Write for ChannelWriter {
+    /// Write the bytes from `buf` to the internal buffer, sending across
+    /// the channel when the internal buffer is full.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.buffer.extend_from_slice(buf);
         if self.buffer.len() >= self.send_size {
@@ -149,6 +113,8 @@ impl Write for ChannelWriter {
         Ok(buf.len())
     }
 
+    /// Flush the buffer, sending any bytes currently in the buffer across
+    /// the channel.
     fn flush(&mut self) -> std::io::Result<()> {
         let b = self.buffer.split().freeze();
         if !b.is_empty() {
@@ -164,6 +130,13 @@ impl Drop for ChannelWriter {
     }
 }
 
+/// A channel reader.
+///
+/// This implements [`Read`] and will read bytes from the
+/// provided [`Receiver`]. This works by pulling a buffer from the
+/// channel and holding it internally to satisfy requests of `read`.
+/// Therefore the size of the buffer on this reader is dependant on the
+/// size of the buffers being sent over the channel.
 #[derive(Debug)]
 pub struct ChannelReader {
     rx: Receiver<Bytes>,
@@ -171,6 +144,7 @@ pub struct ChannelReader {
 }
 
 impl ChannelReader {
+    /// Create a new [`ChannelReader`].
     pub fn new(rx: Receiver<Bytes>) -> Self {
         Self {
             rx,
@@ -180,6 +154,9 @@ impl ChannelReader {
 }
 
 impl Read for ChannelReader {
+    /// Read bytes into the passed in `buf`, returning the number of bytes read in.
+    ///
+    /// If 0 bytes were read into the passed in file then EOF has been reached.
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut total_read = 0;
@@ -217,12 +194,12 @@ impl Read for ChannelReader {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     use bytes::Bytes;
-    use flume::bounded;
+    use flume::{bounded, Receiver, Sender};
 
-    use crate::{ChannelReader, GlommioReader};
+    use crate::{ChannelReader, ChannelWriter};
 
     #[test]
     fn simple_test() {
@@ -259,10 +236,25 @@ mod tests {
     }
 
     #[test]
-    fn simple_test_glommio() {
-        let mut reader = GlommioReader::new("/dev/urandom");
-        let mut buffer = vec![0; 100];
-        reader.read_exact(&mut buffer).unwrap();
-        assert_eq!(buffer.len(), 100);
+    fn test_simple_writer() {
+        let (tx, rx): (Sender<Bytes>, Receiver<Bytes>) = bounded(10);
+        let sender_thread = std::thread::spawn(move || {
+            let mut total_read = 0;
+            while let Ok(bytes) = rx.recv() {
+                total_read += bytes.len();
+            }
+            total_read
+        });
+
+        let mut writer = ChannelWriter::new(tx);
+        writer.write_all(b"Let's add a happy little tree.").unwrap();
+        writer
+            .write_all(b"And maybe a little snowcap right over here.")
+            .unwrap();
+        writer.flush().unwrap();
+        // Note we must drop the writer to dropt he sender to allow the thread to close
+        drop(writer);
+        let bytes_read = sender_thread.join().unwrap();
+        assert_eq!(bytes_read, 73);
     }
 }
