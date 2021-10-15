@@ -61,12 +61,12 @@
 use std::io::{Read, Write};
 
 use bytes::{Buf, Bytes, BytesMut};
-use flume::{bounded, Receiver, Sender};
+use flume::{Receiver, Sender};
 
 /// The default buffer size to use (128K)
 pub const BUFSIZE: usize = 64 * (1 << 10) * 2;
 
-/// A channel writer.
+/// A channel writer that writes bytes to a [`Sender<Bytes>`].
 ///
 /// This implements [`Write`] and will send filled [`Bytes`] buffers
 /// across the provided [`Sender`].
@@ -130,7 +130,7 @@ impl Drop for ChannelWriter {
     }
 }
 
-/// A channel reader.
+/// A channel reader that reads bytes from a [`Receiver<Bytes>`]
 ///
 /// This implements [`Read`] and will read bytes from the
 /// provided [`Receiver`]. This works by pulling a buffer from the
