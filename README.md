@@ -1,12 +1,12 @@
-# 📖 channel_reader
+# 📖 channel_io
 
 <p align="center">
-  <a href="https://github.com/sstadick/channel_reader/actions?query=workflow%3ACheck"><img src="https://github.com/sstadick/channel_reader/workflows/Check/badge.svg" alt="Build Status"></a>
-  <img src="https://img.shields.io/crates/l/channel_reader.svg" alt="license">
-  <a href="https://crates.io/crates/channel_reader"><img src="https://img.shields.io/crates/v/channel_reader.svg?colorB=319e8c" alt="Version info"></a><br>
+  <a href="https://github.com/sstadick/channel_io/actions?query=workflow%3ACheck"><img src="https://github.com/sstadick/channel_io/workflows/Check/badge.svg" alt="Build Status"></a>
+  <img src="https://img.shields.io/crates/l/channel_io.svg" alt="license">
+  <a href="https://crates.io/crates/channel_io"><img src="https://img.shields.io/crates/v/channel_io.svg?colorB=319e8c" alt="Version info"></a><br>
 </p>
 
-A small helper library to convert a `flume` channel of `bytes` into a `ChannelReader` that implements `Read`.
+A small helper library to convert a `flume` channel of `Bytes` into a `Channel{Reader,Writer}` that implements `{Read,Write}`.
 
 ## Example
 
