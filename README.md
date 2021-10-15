@@ -1,7 +1,7 @@
 # 📖 channel_io
 
 <p align="center">
-  <a href="https://github.com/sstadick/channel_io/actions?query=workflow%3ACheck"><img src="https://github.com/sstadick/channel_io/workflows/Check/badge.svg" alt="Build Status"></a>
+  <a href="https://github.com/sstadick/channel_io/actions?query=workflow%3ARust"><img src="https://github.com/sstadick/channel_io/workflows/Rust/badge.svg" alt="Build Status"></a>
   <img src="https://img.shields.io/crates/l/channel_io.svg" alt="license">
   <a href="https://crates.io/crates/channel_io"><img src="https://img.shields.io/crates/v/channel_io.svg?colorB=319e8c" alt="Version info"></a><br>
 </p>
