@@ -9,7 +9,7 @@
 //! use std::io::Read;
 //!
 //! use bytes::Bytes;
-//! use channel_reader::ChannelReader;
+//! use channel_io::ChannelReader;
 //! use flume::bounded;
 //!
 //!
@@ -35,7 +35,7 @@
 //! use std::io::Write;
 //!
 //! use bytes::Bytes;
-//! use channel_reader::ChannelWriter;
+//! use channel_io::ChannelWriter;
 //! use flume::{bounded, Receiver, Sender};
 //!
 //!
@@ -79,6 +79,7 @@ pub struct ChannelWriter {
 
 impl ChannelWriter {
     /// Create a new [`ChannelWriter`]
+    #[must_use]
     pub fn new(tx: Sender<Bytes>) -> Self {
         Self::with_capacity(tx, BUFSIZE)
     }
@@ -87,6 +88,7 @@ impl ChannelWriter {
     ///
     /// The capacity is used both as the size of the internal buffer, as
     /// well as the cutoff at which to send the bytes across the channel.
+    #[must_use]
     pub fn with_capacity(tx: Sender<Bytes>, capacity: usize) -> Self {
         Self {
             tx,
@@ -97,7 +99,7 @@ impl ChannelWriter {
 
     /// Clear the internal buffer
     pub fn reset(&mut self) {
-        self.buffer.clear()
+        self.buffer.clear();
     }
 }
 
@@ -126,7 +128,7 @@ impl Write for ChannelWriter {
 
 impl Drop for ChannelWriter {
     fn drop(&mut self) {
-        self.flush().unwrap()
+        self.flush().unwrap();
     }
 }
 
@@ -145,6 +147,7 @@ pub struct ChannelReader {
 
 impl ChannelReader {
     /// Create a new [`ChannelReader`].
+    #[must_use]
     pub fn new(rx: Receiver<Bytes>) -> Self {
         Self {
             rx,
@@ -179,9 +182,8 @@ impl Read for ChannelReader {
                     Err(e) => {
                         if self.rx.is_disconnected() && self.rx.is_empty() {
                             break;
-                        } else {
-                            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
                         }
+                        return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
                     }
                 };
 
